@@ -1,0 +1,167 @@
+Optimal_match_fn<-function(Matchingcovs_PSM,Treatvar,ID_vars,ratio=1,fitted_glm=T,glm_family="binomial",glmweights=NULL,other_fitted_model=NULL,custom_dist=NULL,Match_type=c("both","Pair","Full"),exact_vars=NULL,include_exact_psm=F,caliper=NULL,Caliper_vars=NULL,Caliper_glm=T,dist_method=c("euclidean","mahalanobis","rank_mahalanobis","custom"),standardization.scale=sd,min.controls = 0, max.controls = Inf,omit.fraction=NULL,global=T,verbose=T){
+  
+  if(global){
+    suppressPackageStartupMessages(require(optmatch))
+  } else require(optmatch)
+  
+  dataframe_name<-pairlist_converter(as.list(match.call())$Matchingcovs_PSM)
+  
+  X<-suppressWarnings(data.table(eval(Matchingcovs_PSM))[,-c("Inverse_weight"),with=F])
+  ll_calls<-as.list(match.call(expand.dots = F))
+  ll<-lapply(ll_calls[c("Treatvar","ID_vars")],as.name)
+  
+  ###Processing Treatment variable by converting it to factor and then assigning numeric values (1 for treatment, 0 for comparison)
+  if(verbose){
+    if(is.numeric(X[[Treatvar]])){
+      print(paste(sQuote(match.call()$Treatvar),"is not of class factor.  Assuming",sQuote(max(X[[Treatvar]])),"is the treatment group."))
+    } else if(is.character(X[[Treatvar]])){
+      print(paste(sQuote(match.call()$Treatvar),"is not of class factor.  Assuming",sQuote(sort(unique(X[[Treatvar]]))[length(unique(X[[Treatvar]]))]),"is the treatment category based on alphanumeric order. If this is incorrect either convert class to a factor specifying proper treatment variable or recode the treatment variable such that the treatment code is the highest alphanumeric value."))
+    } else {
+      print(paste(sQuote(match.call()$Treatvar),"is of class factor and assuming",sQuote(levels(X[[Treatvar]])[nlevels(X[[Treatvar]])]),"is the treatment group."))
+    }
+  }
+  
+  X[[Treatvar]]<-cat2facNum_converter_fn(X[[Treatvar]],verbose=F)##Converted to factor
+  
+  orig_treat_levels<-setNames(levels(X[[Treatvar]]),c("Comparison","Treatment"))##Link between original levels and comparison and treatment.
+  X<-copy(X)[,eval(Treatvar):=as.numeric(eval(ll$Treatvar))-1]
+  if(is.null(custom_dist)){
+    X_optmatch<-suppressWarnings(X[,-c("psmscore"),with=F])
+  }else if(custom_dist == "psmscore"){
+    X_optmatch<-copy(X)
+  }else{
+    print("Please rethink your custom distance")
+  }
+  
+  #Match_on syntax
+  ##1. This nested switch statament allows for all valid classes of "x" for match_on.
+  if(is.null(other_fitted_model)){
+    glm_method<-switch(dist_method[1],
+                       "euclidean"={
+                         if(!include_exact_psm){
+                           substitute(glm(paste(eval(Treatvar),"~",paste0(colnames(X_optmatch)[-match(c(Treatvar,ID_vars,exact_vars),colnames(X_optmatch))],collapse = "+")),data=X_optmatch,family=glm_family,weights=glmweights))
+                         } else {
+                           substitute(glm(as.formula(paste(Treatvar,"~",paste0(colnames(X_optmatch)[-match(c(Treatvar,ID_vars),colnames(X_optmatch))],collapse = "+"))),data=X_optmatch,family=glm_family,weights=glmweights))
+                         }
+                       },
+                       "mahalanobis"={
+                         as.formula(paste(Treatvar,"~",paste0(colnames(X_optmatch)[-match(c(ID_vars,exact_vars,Treatvar),colnames(X_optmatch))],collapse="+")))
+                       },
+                       "rank_mahalanobis"={
+                         as.formula(paste(Treatvar,"~",paste0(colnames(X_optmatch)[-match(c(ID_vars,exact_vars,Treatvar),colnames(X_optmatch))],collapse="+")))
+                       },
+                       "custom"={
+                         if(!is.null(custom_dist)){
+                           list(x=setNames(X_optmatch[[custom_dist]],X_optmatch[[ID_vars]]),z=X_optmatch[[Treatvar]])
+                         }
+                         else {
+                           stop(paste0("Entering custom implies you created your own distance measure outside this function and attached that measure to your data set.  Please include the name of this variable in ",dataframe_name,"."))
+                         }
+                       },
+                       
+                       stop("You need to specifiy a valid dist-method in the function call!"))
+  } else {
+    glm_method<-other_fitted_model
+  }
+  if(!is.null(custom_dist)){
+    X_optmatch<-suppressWarnings(X[,-c(custom_dist),with=F])
+  }
+  ##2. Creates caliper specification
+  if(!is.null(Caliper_vars)){
+    if(Caliper_glm){
+      Caliper_glm_model<-substitute(glm(paste(Treatvar,"~",paste0(Caliper_vars,collapse = "+")),data=X_optmatch,family=glm_family,weights=glmweights))
+      
+      Caliper_model<-suppressWarnings(caliper(eval(match_on(eval(Caliper_glm_model),data=X_optmatch,standardization.scale=standardization.scale)),width = caliper))
+    } else{
+      Caliper_model<-caliper(match_on(as.formula(paste(Treatvar,"~",paste0(Caliper_vars,collapse = "+"))),data=X_optmatch),width = caliper)}##Possibly add an else statement for mahalanobis all vars
+  }
+  
+  ##3. Creates exact matches
+  if(!is.null(exact_vars)){
+    Within_model<-as.formula(paste(Treatvar,"~",paste0(exact_vars,collapse="+")))
+  }
+  ####This switch combines all possible forms of syntax options for the match_on matrix which will then be passed onto pair match or full match.
+  exact_cal_var_ind<-as.character(interaction(is.null(exact_vars),is.null(Caliper_vars)))
+  match_on_matrix<-switch(exact_cal_var_ind,
+                          "TRUE.TRUE"={
+                            if(is.null(custom_dist)) {
+                              match_on(eval(glm_method),data=X_optmatch,caliper=caliper,standardization.scale=standardization.scale)
+                            } else{
+                              match_on(x=glm_method$x,data=X_optmatch,z=glm_method$z,caliper=caliper,standardization.scale=standardization.scale)
+                            }
+                          },
+                          "TRUE.FALSE"={
+                            if(is.null(custom_dist)) {
+                              match_on(eval(glm_method),data=X_optmatch,standardization.scale=standardization.scale)+Caliper_model
+                            } else {
+                              match_on(x=glm_method$x,data=X_optmatch,z=glm_method$z,standardization.scale=standardization.scale)+Caliper_model}
+                          },
+                          "FALSE.TRUE"={
+                            if(is.null(custom_dist)) {
+                              match_on(eval(glm_method),data=X_optmatch,within = exactMatch(Within_model,data=X_optmatch),caliper=caliper,standardization.scale=standardization.scale)
+                            } else {
+                              match_on(x=glm_method$x,data=X_optmatch,z=glm_method$z,within = exactMatch(Within_model,data=X_optmatch),caliper=caliper,standardization.scale=standardization.scale)
+                            }
+                          },
+                          "FALSE.FALSE"={
+                            if(is.null(custom_dist)) {
+                              match_on(eval(glm_method),data=X_optmatch,within=exactMatch(Within_model,data=X_optmatch),standardization.scale=standardization.scale)+Caliper_model
+                            } else {
+                              match_on(x=glm_method$x,data=X_optmatch,z=glm_method$z,within = exactMatch(Within_model,data=X_optmatch),standardization.scale=standardization.scale)+Caliper_model
+                            }
+                          })
+  
+  matches<-switch(Match_type[1],
+                  "both"={
+                    if(is.null(custom_dist)){
+                      list(Full=full(match_on_matrix,data=X_optmatch,min.controls=min.controls,max.controls=max.controls,omit.fraction=omit.fraction),Pair=pair(match_on_matrix,controls=ratio,data=X_optmatch))
+                    }else{
+                      list(Full=full(match_on_matrix,min.controls=min.controls,max.controls=max.controls,omit.fraction=omit.fraction),Pair=pair(match_on_matrix,controls=ratio))
+                    }
+                    },
+                  "Pair"={
+                    if(is.null(custom_dist)){
+                    list(Pair=pair(match_on_matrix,controls = ratio,data=X_optmatch))
+                  }else{
+                    list(Pair=pair(match_on_matrix,controls = ratio))
+                    }
+                    },
+                  "Full"={
+                    if(is.null(custom_dist)){
+                    list(Full=full(match_on_matrix,data=X_optmatch,min.controls=min.controls,max.controls=max.controls,omit.fraction=omit.fraction))
+                  }else{
+                    list(Full=full(match_on_matrix,min.controls=min.controls,max.controls=max.controls,omit.fraction=omit.fraction))
+                  }
+                    },
+                  stop("Must enter a valid type of matching!"))
+  
+  final_matches_all<-tryCatch(
+    {
+      lapply(matches,function(i) data.table(data.frame(X,Match_num=as.numeric(plyr::mapvalues(i,levels(i),1:nlevels(i))),Match_status=matched(i)))[,eval(Treatvar):=factor(eval(ll$Treatvar),labels = c("Comparison","Treatment"))])
+    },error=function(e) 1)
+  
+  final_matches<-tryCatch(lapply(final_matches_all,function(i) i[Match_status==T]),error = function(e) NULL)
+  Unmatched_treat<-lapply(final_matches_all,function(i) tryCatch(i[Match_status==F&eval(ll$Treatvar)=="Treatment",ID_vars,with=F],error=function(e) NULL))
+  Failed_matches<-matches
+  
+  #Printing quick summary to console
+  lapply(seq_along(final_matches),function(i) print(paste(nrow(Unmatched_treat[[i]]),"treatment subjects removed and",length(unique(final_matches[[i]][[ID_vars]])),"total unique subjects in the",names(final_matches)[i],"matched set.")))
+  
+  if(global){
+    basenames<-tryCatch(lapply(seq_along(final_matches),function(i) paste(names(final_matches)[i],as.character(dataframe_name),sep="_")),error=function(e) NULL)
+    if(!is.null(final_matches)){
+      if(exists(basenames[[1]],envir = .GlobalEnv)){
+        basenames<-Global_name_gen(names(final_matches),dataframe_name)
+      }
+    }
+    
+    if(!is.null(final_matches)){
+      lapply(seq_along(final_matches),function(i){
+        assign(basenames[[i]],final_matches[[i]],envir = .GlobalEnv)
+      })
+    }
+    
+  }
+  
+  return(list(Matched_sets=final_matches,UnmatchedIDs=Unmatched_treat))
+}
