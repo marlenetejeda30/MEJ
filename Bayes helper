@@ -1,0 +1,14 @@
+predict.MCMC<- function(MCMCfit, pred_data, type="median"){
+  pred_vars<- rbind(t(rep(1,nrow(pred_data))),pred_data[,colnames(MCMCfit)[-1],with=F][,transpose(.SD)])
+  predict.p.mcmc <-  1 / (1 + exp(-MCMCfit %*% data.matrix(pred_vars)))
+  #interval.p.mcmc <- function(x, low, high) apply(predict.p.mcmc(x), 2,
+                                                  #function(x) quantile(x, c(low, high)))
+  final_output<- switch(type,
+                        "median"= {
+                          data.table(predict.p.mcmc)[,sapply(.SD,median)]
+                        },"mean"= {
+                          data.table(predict.p.mcmc)[,sapply(.SD,mean)]
+                        })
+  return(final_output)
+  
+}
