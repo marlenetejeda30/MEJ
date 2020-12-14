@@ -1,0 +1,114 @@
+Nearest_Match_fn<-function(Matchingcovs_PSM,Treatvar,ID_vars,include.psm=F,distance="glm",custom_dist=F,matching_model="glm",family="binomial",weights=NULL,ratio=1,m.order="random",caliper=NULL,exact_vars=NULL,ties=T,distance.tolerance=1e-05,global=T,...){
+  '%notin%'<-Negate('%in%')
+  require(data.table)
+  dataframe_name<-pairlist_converter(as.list(match.call())$Matchingcovs_PSM)
+  X_psm<-suppressWarnings(data.table(eval(Matchingcovs_PSM))[,-c("Inverse_weight"),with=F])
+  if(sum(sapply(X_psm,function(i) sum(is.na(i))))){stop("You need to remove missing values first.  Use SD_mean_before function to run diagnostics and remove missing values.")}
+  
+  #Checking for numeric data
+  if(sum(sapply(copy(X_psm)[,-c(Treatvar,ID_vars),with=F],is.numeric)==F)!=0){stop(paste("You need to change",paste(sQuote(names(which(sapply(copy(X_psm)[,-c(Treatvar,ID_vars),with=F],is.numeric)==F))),collapse=","),"to numeric data first!"))}
+  
+  ll<-lapply(as.list(match.call(expand.dots = F))[c("Treatvar","ID_vars")],as.name)
+  ##Checking if the psmvariable is attached to dataframe
+  if(include.psm==F){
+    X<-suppressWarnings(copy(X_psm)[,-c("psmscore"),with=F])
+  } else {X<-copy(X_psm)}
+  Treatvar_class<-class(X[[Treatvar]])
+  X[[Treatvar]]<-switch(Treatvar_class,
+                        "factor"={print(paste0(sQuote(ll$Treatvar)," is a factor. Assigning 0 to ",sQuote(levels(X[[Treatvar]])[1])," and 1 to ",sQuote(levels(X[[Treatvar]])[2]),". If this is incorrect assign higher level of ",sQuote(ll$Treatvar)," to the treatment and rerun."));as.numeric(X[[Treatvar]])-1
+                        },
+                        "numeric"={print(paste0(sQuote(ll$Treatvar)," is numeric. Assigning 0 to ",sQuote(min(X[[Treatvar]]))," and 1 to ",sQuote(max(X[[Treatvar]])),". If this is incorrect assign higher value of ",sQuote(ll$Treatvar)," to the treatment and rerun."));plyr::mapvalues(X[[Treatvar]],sort(unique(X[[Treatvar]])),c(0,1))
+                        },
+                        "character"={tmp_fac<-factor(ll$Treatvar);print(paste0(sQuote(X[[Treatvar]])," is a character vector. Assigning 0 to ",sQuote(levels(tmp_fac)[1])," and 1 to ",sQuote(levels(tmp_fac)[2]),". If this is incorrect convert ",sQuote(ll$Treatvar)," to a factor or numeric variable and rerun."));as.numeric(tmp_fac)-1
+                        },
+                        stop(print(paste("Cannot match on",sQuote(ll$Treatvar),"because it is not a factor or numeric vector.  Check to see if you assigned correct variable to",sQuote("Treatvar"))))
+  )
+  if(custom_dist==F){
+    if(xtabs(paste("~",Treatvar),data = X)[1]<xtabs(paste("~",Treatvar),data=X)[2]&m.order=="random"){
+      print("Fewer control than treated units preventing default random matching order. Nearest Neighbor without Replacement will match Treatment units in the order of largest to smallest. Specify 'smallest' in m.order option if you wish to change the matching behavior or add a caliper to prevent potential poor matches.")
+      m.order="largest"
+    }
+    
+    ##GLM to pass to matchit or optmatch
+    if(is.null(caliper)){caliper=0}
+    matchit_formula<-as.formula(paste(eval(Treatvar),"~.",paste0("-(",c(ID_vars,exact_vars),")")))
+    Matching_nearest_results<- switch(distance,
+                                      "glm"={
+                                        suppressWarnings(lapply(lapply(c(TRUE,FALSE),function(i) MatchIt::matchit(matchit_formula,data=X,distance= distance,ratio=ratio,m.order=m.order,caliper=caliper,exact=exact_vars,replace=i)),"[","match.matrix"))
+                                      },
+                                      "mahalanobis"={
+                                        if(caliper== 0){
+                                          suppressWarnings(lapply(lapply(c(TRUE,FALSE),function(i) MatchIt::matchit(matchit_formula,data=X,distance= distance,ratio=ratio,m.order=m.order,caliper=NULL,exact=exact_vars,replace=i)),"[","match.matrix"))
+                                        }else{
+                                          pred_var<- setdiff(colnames(X),c(ID_vars,exact_vars,Treatvar))
+                                          mahal_formula<-as.formula(paste("~",paste0(pred_var,collapse = "+")))
+                                          suppressWarnings(lapply(lapply(c(TRUE,FALSE),function(i) MatchIt::matchit(matchit_formula,data=X,distance= matching_model,ratio=ratio,m.order=m.order,caliper=caliper,
+                                                                                                                    mahvars =mahal_formula, exact=exact_vars,replace=i)),"[","match.matrix"))
+                                        }
+                                      },
+                                      "MCMC"={
+                                        mcmc_fit<- MCMClogit(matchit_formula,data = X)
+                                        mcmc_ps<- predict.MCMC(mcmc_fit,X)
+                                        X_psm[,mcmc_psm:= mcmc_ps]
+                                        suppressWarnings(lapply(lapply(c(TRUE,FALSE),function(i) MatchIt::matchit(matchit_formula,data=X,distance=mcmc_ps ,ratio=ratio,m.order=m.order,caliper=caliper,
+                                                                                                                  exact=exact_vars,replace=i)),"[","match.matrix"))
+                                      },{})
+    
+    #if(matching_model=="glm"){
+    #matchit_formula<-as.formula(paste(eval(Treatvar),"~.",paste0("-(",c(ID_vars,exact_vars),")")))
+    #matching_model<-suppressWarnings(substitute(glm(glm_call,data=X,family = family)))
+    #matching_model<-substitute(glm(paste(eval(Treatvar),"~.",paste0("-(",c(ID_vars,exact_vars),")")),data=X,family = family,weights=weights))
+    #} else matching_model<-substitute(matching_model)
+    #print(matching_model)
+    #Matching_nearest_results<-suppressWarnings(lapply(lapply(c(TRUE,FALSE),function(i) MatchIt::matchit(matchit_formula,data=X,distance= distance,ratio=ratio,m.order=m.order,caliper=caliper,exact=exact_vars,replace=i)),"[","match.matrix"))
+    
+    All_match_results<-lapply(setattr(Matching_nearest_results,"names",c("Nearest_with_replacement","Nearest_without_replacement")),function(i) data.table(setNames(data.frame(i),paste0(rep("Comparison",ratio),c(1:ratio))),keep.rownames = "Treat"))
+    
+    Matched_sets<-lapply(All_match_results,function(i) melt(copy(i)[,colnames(i):=lapply(.SD,function(j) eval(X[[ID_vars]])[match(j,attr(X,"row.names"))]),.SDcols=colnames(i)][,Match_num:=1:.N],id.vars="Match_num",variable.name=Treatvar,value.name=ID_vars)[,Match_num:=as.numeric(Match_num)])
+    
+    Unmatched_treatment<-lapply(Matched_sets,function(i) copy(i)[Match_num%in%copy(i)[is.na(eval(ll$ID_vars))]$Match_num][eval(ll$Treatvar)=="Treat"][,c(ID_vars,"Match_num"),with=F])
+    Function_ind<-"MatchIt"
+  } else{
+    Function_ind<-"Matching"
+    if(distance%in%colnames(X)){
+      Matching_nearest_results<-setattr(lapply(c(TRUE,FALSE), function(i) Matching::Match(Tr=X[[Treatvar]],X=X[[distance]],M=ratio,ties = ties,weights=weights,caliper = caliper,distance.tolerance = distance.tolerance,replace=i)),"names",c("Nearest_with_replacement","Nearest_without_replacement"))
+      
+      Matched_sets<-lapply(Matching_nearest_results,function(i) unique(melt(data.table(data.frame(i[match(c("index.treated","index.control"),names(i))]))[,Match_num:=rep(seq_along(rle(index.treated)$lengths),rle(index.treated)$lengths)],id.vars="Match_num"),by=c("Match_num","value"))[,-c("variable"),with=F])
+      
+      Unmatched_treatment<-lapply(Matching_nearest_results,function(i) unname(unlist(copy(X)[i[["index.dropped"]],ID_vars,with=F])))
+    } else {stop(paste0("Name of your 'custom distance' must appear in " ,sQuote(dataframe_name)))}
+  }
+  if(Function_ind=="MatchIt"){
+    Final_matched_sets<-setattr(lapply(seq_along(Matched_sets),function(i) copy(X_psm)[eval(copy(Matched_sets[[i]])[,-c(Treatvar),with=F]),on=ID_vars][Match_num%notin%Unmatched_treatment[[i]]$Match_num]),"names",names(Matched_sets))
+    print("Matching conducted using the 'MatchIt' package.")
+  } else {
+    Final_matched_sets<-setattr(lapply(seq_along(Matched_sets),function(i) copy(X)[,value:=as.numeric(row.names(.SD))][Matched_sets[[i]],on="value"][,-c("value"),with=F]),"names",names(Matched_sets))
+    print("Matching conducted using the 'Matching' package.")
+  }
+  if(is.null(exact_vars)){
+    exact_data<-suppressWarnings(copy(X)[,-c(Treatvar,distance,ID_vars),with=F])
+    exact_patterns<-unique(exact_data,by=colnames(exact_data))[,Match_num:=.I]
+    exact_data_IDs<-copy(X)[,ROWID:=.I][,c("ROWID",ID_vars),with=F]
+    Exact_all_test<-suppressWarnings(tryCatch(Matching::Match(Tr=X[[Treatvar]],X=exact_data,exact = T,caliper=NULL),error=function(e) 1))
+    if(is.list(Exact_all_test)){
+      Exact_all<-rbindlist(lapply(c("index.control","index.treated"),function(i) setnames(data.table(data.frame(Exact_all_test[[i]])),"ROWID")))
+      Final_matched_sets<-append(Final_matched_sets,list(Exact=unique(exact_patterns[eval(copy(X)[exact_data_IDs,on=ID_vars][Exact_all,on="ROWID"][,-c("ROWID"),with=F]),on=colnames(exact_data)],by=ID_vars)))
+      Unmatched_treatment<-append(Unmatched_treatment,list(data.table(data.frame(ID=unname(unlist(copy(X)[Exact_all_test[["index.dropped"]],ID_vars,with=F]))))))
+      names(Unmatched_treatment)[3]<-"Exact"
+    }
+  }
+  
+  if(global){
+    basenames<-lapply(seq_along(Final_matched_sets),function(i) paste(names(Final_matched_sets)[i],as.character(dataframe_name),sep="_"))
+    if(exists(basenames[[1]],envir = .GlobalEnv)){
+      basenames<-Global_name_gen(names(Final_matched_sets),dataframe_name)
+    }
+    lapply(seq_along(Final_matched_sets),function(i){
+      assign(basenames[[i]],Final_matched_sets[[i]],envir = .GlobalEnv)
+    })
+  }
+  
+  ###Printing quick summary to console
+  lapply(seq_along(Final_matched_sets),function(i) print(paste(nrow(Unmatched_treatment[[i]]),"treatment subjects removed and",nrow(unique(copy(Final_matched_sets[[i]]),by=ID_vars)),"total unique subjects in the",names(Final_matched_sets)[i],"matched set.")))
+  return(list(Matched_Sets=Final_matched_sets,Unmatched_IDs=Unmatched_treatment,Raw_function_output=Matching_nearest_results))
+}
